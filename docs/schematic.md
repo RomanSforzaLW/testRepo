@@ -24,6 +24,105 @@ Recommended decoupling intent (place physically at each consumer):
 
 ---
 
+## Power supply design (architecture-level)
+
+### Do we have enough information?
+
+- **Enough to define the topology**: yes (what rails exist, isolation partitioning, sequencing, filtering strategy).
+- **Not enough to finalize component values**: not yet. To size converters/inductors/bulk caps confidently we still need:
+  - **Piezo**: active area \(A\), impedance vs frequency (or equivalent model) across **0.5–1.5 MHz**
+  - **LIPUS protocol**: envelope PRF, duty cycle, max session “ON” fraction, and how “sweep” is scheduled (continuous chirp vs step sweep)
+  - **PEMF**: peak coil current, pulse width, repetition rate, allowed droop, and whether PEMF and LIPUS can run simultaneously
+  - **Battery configuration**: 1S vs 2S, minimum VBAT before cutoff, charge-path constraints (operate while charging or not)
+
+Even without those, we can implement a correct **rail tree** and leave “rating placeholders” to be filled after measurement.
+
+### Recommended rail tree (block diagram)
+
+```text
+VBAT (Li-ion) 
+  |
+  +--> Buck/LDO -> VLOGIC_3V3 (nRF5340, low-voltage logic)
+  |
+  +--> Boost #1 -> VDRV_POS (+20..+24V)  -----> LIPUS bridge + PEMF pulse rail (optional share)
+  |
+  +--> Inverter/IBB -> VDRV_NEG (-20V)  ------> LIPUS bridge negative rail
+  |
+  +--> (Option) Boost or Buck -> VGD (~10..12V) -> MD1210 gate-drive supply (if required by chosen MD1210 configuration)
+  |
+  +--> (Option) Isolated DC/DC -> VISO_3V3/5V -> ISO7720DR side-2 supply (if true isolation is required beyond signal isolation)
+```
+
+### Sharing vs splitting the +HV rail
+
+- **Option 1 (shared +HV rail)**: `VDRV_POS` also serves as `VPEMF`.
+  - Pros: fewer converters, simpler BOM.
+  - Cons: PEMF pulses inject droop/EMI onto LIPUS rail; needs stronger filtering and bulk capacitance.
+
+- **Option 2 (split rails)**: separate `VPEMF` converter/cap bank from `VDRV_POS`.
+  - Pros: easier to keep LIPUS clean at 0.5–1.5 MHz sweeps.
+  - Cons: more parts.
+
+### Bulk capacitor sizing method (PEMF pulse rail)
+
+To limit droop during a PEMF pulse, use:
+
+\[
+\Delta V \approx \frac{I_{pulse}\cdot t_{pulse}}{C_{bulk}}
+\]
+
+Example placeholder (replace with real PEMF numbers):
+- If \(I_{pulse}=8A\), \(t_{pulse}=0.5ms\), and you allow \(\Delta V=1V\),
+  - \(C_{bulk} \approx 8A \cdot 0.5ms / 1V = 4000\ \mu F\)
+
+That number is why PEMF rails usually use a **local electrolytic/polymer bank** close to the coil switch, plus ceramics for edge current.
+
+### LIPUS rail stability and decoupling
+
+The LIPUS half-bridge at 0.5–1.5 MHz needs:
+- **very small high-frequency loops** (MLCCs tight to MOSFETs/driver)
+- enough **local energy** that the rail doesn’t “bounce” during burst edges
+
+Practical schematic pattern near the half-bridge:
+- across `VDRV_POS` to `VDRV_NEG`: `C_HF1 100nF` + `C_HF2 1uF` + `C_HF3 10uF` (high-voltage MLCCs, derated)
+- plus optional local bulk on `VDRV_POS` (and/or `VDRV_NEG`) depending on measured rail impedance
+
+### Sequencing / enables (recommended)
+
+Define explicit enable nets so faults can shut down power, not just gate-drive:
+- `EN_HV_POS`: enable for `VDRV_POS` converter
+- `EN_HV_NEG`: enable for `VDRV_NEG` converter
+- `EN_VGD`: enable for gate-driver rail (if separate)
+- `LIPUS_OE`: MD1210 output enable (fast)
+
+Suggested behavior:
+- Bring up `VLOGIC_3V3` first
+- Then enable `VDRV_POS` and `VDRV_NEG`, wait for rails “power-good”
+- Then release `LIPUS_OE`
+- On fault: assert `LIPUS_OE` immediately, then disable `EN_HV_*` if the fault persists (prevents DC bias / heating)
+
+### Switching frequency / sync strategy (conceptual)
+
+If you synchronize multiple switchers, avoid generating intermodulation near the LIPUS carrier sweep band.
+- Keep DC/DC switching frequency well away from 0.5–1.5 MHz **or** synchronize everything to a known frequency and manage filtering.
+- Exact feasibility depends on the chosen converter(s) and their sync range.
+
+### Power budget linkage to SATA 500 mW/cm²
+
+To translate customer “SATA 500 mW/cm²” into electrical rail current, you need:
+- transducer area \(A\)
+- efficiency \(\eta\)
+
+\[
+P_{acoustic} = 0.5\ \mathrm{W/cm^2}\cdot A
+\qquad
+P_{electrical} \approx \frac{P_{acoustic}}{\eta}
+\]
+
+From \(P_{electrical}\) you can derive expected average `VDRV_POS`/`VDRV_NEG` rail currents over the burst schedule and size the converters.
+
+---
+
 ## LIPUS driver schematic (net-level)
 
 ### Functional blocks
