@@ -127,6 +127,11 @@ From \(P_{electrical}\) you can derive expected average `VDRV_POS`/`VDRV_NEG` ra
 
 You can design this with **1-cell (1S)** or **2-cell (2S)** Li-ion. USB-C **Power Delivery (PD)** is a good fit because you can request a higher input voltage (e.g., 9 V / 12 V / 15 V) to reduce cable loss and make conversion more efficient.
 
+### Selected direction (project decision)
+
+- **Battery**: **2S Li-ion**
+- **Use while charging**: **Yes** (requires **power-path** charger with a regulated `SYS` node)
+
 ### Key decision: 1S vs 2S
 
 - **1S (single cell, 4.2 V max)**:
@@ -193,6 +198,61 @@ BAT (2S series pack, 8.4V max)
   |
 Cell protection + (balancing strategy required)
 ```
+
+### Recommended 2S “use while charging” topology (details)
+
+Use a **2S charger with power-path** (sometimes called NVDC / DPM / “system rail” architecture):
+
+```text
+USB-C VBUS
+  |
+  +-- TVS/ESD
+  |
+  +-- PD Sink (e.g., IP2721 fixed-PDO trigger)
+  |        - requests 9V/12V/15V from adapter
+  v
+VBUS_PD
+  |
+  +-- eFuse / OVP / inrush (protects connector + board)
+  v
+CHARGER VIN  ------------------------------.
+  |                                        \
+  |                                         \  power-path inside charger
+  v                                          \
+SYS (regulated system rail) ------------------> + downstream DC/DC rails (+HV, -HV, 3V3, gate-drive, etc.)
+  |
+BAT (2S pack, 6.0–8.4V) <---- balancing/protection/NTC ---- pack
+```
+
+What this achieves:
+- Adapter powers `SYS` directly when plugged in.
+- Battery charges when there is available input headroom.
+- During therapy bursts, if load > adapter, the charger automatically reduces charge current and/or the battery supplements `SYS` (depending on charger features).
+
+### PD voltage recommendation (with IP2721-style fixed PDO selection)
+
+For 2S + power-path, **12 V or 15 V** input contracts are usually the sweet spot:
+- **12 V**: enough headroom above 8.4 V to charge 2S with a buck charger; lower voltage stress.
+- **15 V**: more headroom for peak system load while charging; often better if you expect higher instantaneous power demand.
+
+Design rule:
+- Ensure the charger **VIN min** is comfortably below your chosen PD voltage (including cable droop).
+- Ensure total input power \(P_{in}=V_{PD}\cdot I_{PD}\) covers **system power + charging power** (or plan to throttle charging during therapy).
+
+### “Operate while charging” requirements checklist (schematic-level)
+
+- **Charger must support power-path / SYS node**:
+  - `VIN` input current limit (hardware-set and/or I²C programmable)
+  - `SYS` regulation (system stays up if battery is low)
+  - Dynamic Power Management (DPM): automatically reduces charge current when load rises
+- **2S pack management**:
+  - Pack protection (OV/UV/OC/SC) and **balancing** (pack-integrated or board-level)
+  - `TS/NTC` pin to charger (stop/derate charge when pack is hot/cold)
+- **Therapy mode policy**:
+  - Firmware can assert `CHG_SUSPEND` or reduce `I_CHG` while PEMF/LIPUS active to prevent overheating and USB PD brown-outs.
+- **Input protection**:
+  - eFuse/OVP sized for worst-case PD contract
+  - controlled inrush to avoid PD renegotiation/reset events on plug-in
 
 ### Cell balancing (2S requirement)
 
