@@ -123,6 +123,122 @@ From \(P_{electrical}\) you can derive expected average `VDRV_POS`/`VDRV_NEG` ra
 
 ---
 
+## USB-C (PD) + Li-ion battery charging / power-path (architecture-level)
+
+You can design this with **1-cell (1S)** or **2-cell (2S)** Li-ion. USB-C **Power Delivery (PD)** is a good fit because you can request a higher input voltage (e.g., 9 V / 12 V / 15 V) to reduce cable loss and make conversion more efficient.
+
+### Key decision: 1S vs 2S
+
+- **1S (single cell, 4.2 V max)**:
+  - Pros: simplest charging, easiest protection, widest IC choice, simpler balancing (none).
+  - Cons: your +HV rails (+20…+24 V and -20 V) require higher conversion ratio from VBAT.
+- **2S (two cells in series, 8.4 V max)**:
+  - Pros: easier/more efficient to generate +20…+24 V, more headroom for pulse loads.
+  - Cons: charging is more complex; you must address **cell balancing** (either use a protected/balanced 2S pack or add monitoring/balancing circuitry).
+
+### Recommended functional blocks (common to both)
+
+1. **USB-C receptacle** (USB2 is enough unless you need data)
+2. **ESD protection** on CC pins, D+/D-, and VBUS
+3. **PD sink controller** to negotiate voltage/current (or fixed 5 V if no PD)
+4. **Input protection / power-path front end**
+   - eFuse / OVP / inrush limiting on `VBUS_PD`
+   - optional ideal diode OR-ing if you support multiple inputs
+5. **Battery charger with power-path** (“NVDC” style) so the system can run from USB while charging
+6. **Battery protection** (pack PCB or on-board protector) + optional fuel gauge
+
+### Block diagram: 1S with USB-PD
+
+```text
+USB-C Receptacle
+  |
+  +-- ESD (CC1/CC2, D+/D-, VBUS)
+  |
+PD Sink Controller  ---> negotiates PDO (ex: 9V/12V)
+  |
+VBUS_PD (5..20V depending on contract)
+  |
+eFuse / OVP / inrush limiting
+  |
+1S Buck Charger + Power-Path (SYS node)
+  |            \
+  |             +--> SYS (system input) -> downstream rails (3V3, +HV, -HV, etc.)
+  |
+BAT (1S cell, 4.2V max) + protector (pack or on-board)
+```
+
+**Typical 1S IC categories** (choose based on your input range and desired features):
+- **PD sink controller** (standalone contract): e.g., STUSB4500-class, TI TPS25750-class, or a PD PHY (FUSB302-class) with MCU PD stack.
+- **Input protection**: eFuse/OVP with programmable current limit and fast short protection.
+- **1S charger + power-path**: “switch-mode buck charger with power-path” (supports input up to at least your negotiated PD voltage).
+
+### Block diagram: 2S with USB-PD
+
+```text
+USB-C Receptacle
+  |
+  +-- ESD
+  |
+PD Sink Controller  ---> request 9V/12V/15V
+  |
+VBUS_PD
+  |
+eFuse / OVP / inrush limiting
+  |
+2S Charger + Power-Path (buck or buck-boost, depending on PD range)
+  |            \
+  |             +--> SYS -> downstream rails
+  |
+BAT (2S series pack, 8.4V max)
+  |
+Cell protection + (balancing strategy required)
+```
+
+### Cell balancing (2S requirement)
+
+If you go **2S**, pick one:
+- **Use a 2S pack that already includes** protection + balancing PCB (simplest integration).
+- **Add a battery monitor/balancer** (more design work; better visibility into cell health).
+
+### “Operate while charging” (power-path behavior)
+
+Strongly recommended for a handheld device:
+- Use a charger that provides a **system node (`SYS`)** regulated from the adapter while also charging the battery.
+- Define system policy for high loads:
+  - If PEMF + LIPUS peak load is high, you may need to **limit charging current** during therapy sessions (thermal + adapter limits).
+  - Consider firmware control of `I_CHG`/`I_IN` limits (many chargers support I²C control).
+
+### PD contract recommendations (practical)
+
+- If you can, request **9 V or 12 V** rather than 5 V:
+  - lower input current for the same power
+  - easier EMI/thermal management in the cable and connector
+- Keep a safe fallback to **5 V default** (device must not overdraw before PD contract).
+
+### Charging current guidance (2500 mAh pack)
+
+Without your thermal model we can’t “lock” the charge rate, but typical design points:
+- **0.5C**: ~1.25 A charge current (gentler thermally)
+- **1.0C**: ~2.5 A (often thermally limited in compact enclosures)
+
+You’ll likely set:
+- `I_IN_MAX` based on negotiated PD current and connector thermal
+- `I_CHG_MAX` based on battery spec + enclosure temperature rise
+
+### Nets to add to the schematic (recommended)
+
+- USB/PD:
+  - `USB_VBUS`, `USB_CC1`, `USB_CC2`, `USB_D+`, `USB_D-`, `VBUS_PD`
+  - `PD_INT` / `PD_I2C` (if used), `VBUS_DISCH` (if implemented)
+- Charger/power-path:
+  - `SYS_IN` (system power from adapter/charger)
+  - `BAT+` (and `BAT-`), `TS` (battery NTC), `CHG_STAT`, `PGOOD`
+  - `EN_CHG`, `ILIM_SET` (or I²C-controlled limits)
+- Safety:
+  - `SHIP_MODE` (if supported), `PACK_PRES` (if using removable pack)
+
+---
+
 ## LIPUS driver schematic (net-level)
 
 ### Functional blocks
